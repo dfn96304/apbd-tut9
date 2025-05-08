@@ -29,11 +29,16 @@ public class DbService : IDbService
         return exists;
     }
 
+    public class NotFoundException : Exception
+    {
+        public NotFoundException(string message) : base(message) { }
+    }
+
     public async Task<int> Test(TestDTO testDTO)
     {
         int ret = -1;
         
-        Console.WriteLine("Connection string: "+_configuration.GetConnectionString("Default"));
+        //Console.WriteLine("Connection string: "+_configuration.GetConnectionString("Default"));
         
         await using var connection = new SqlConnection(_configuration.GetConnectionString("Default"));
         await using SqlCommand command = connection.CreateCommand();
@@ -57,7 +62,10 @@ public class DbService : IDbService
             
             using (var reader = await command.ExecuteReaderAsync())
             {
-                await reader.ReadAsync();
+                if (!await reader.ReadAsync())
+                {
+                    throw new NotFoundException("Product ID not found");
+                }
                 price = reader.GetDecimal(reader.GetOrdinal("Price"));
                 if (await reader.ReadAsync()) throw new Exception();
                 reader.Close();
@@ -67,12 +75,12 @@ public class DbService : IDbService
 
             if (!CheckIfWarehouseExists(command, testDTO.IdWarehouse).Result)
             {
-                throw new Exception("Warehouse ID not found");
+                throw new NotFoundException("Warehouse ID not found");
             }
 
             if (!(testDTO.Amount > 0))
             {
-                throw new Exception("Amount must be greater than 0");
+                throw new ArgumentException("Amount must be greater than 0");
             }
 
             // Step 2
@@ -88,13 +96,13 @@ public class DbService : IDbService
             {
                 if (!await reader.ReadAsync())
                 {
-                    throw new Exception("Corresponding order not found");
+                    throw new NotFoundException("Corresponding order not found");
                 }
                 idOrder = reader.GetInt32(reader.GetOrdinal("IdOrder"));
                 var createdAt = reader.GetDateTime(reader.GetOrdinal("CreatedAt"));
                 if (!(createdAt < testDTO.CreatedAt))
                 {
-                    throw new Exception($"CreatedAt of the Order ({createdAt}) is not lower than CreatedAt in the request ({testDTO.CreatedAt})");
+                    throw new ArgumentException($"CreatedAt of the Order ({createdAt}) is not lower than CreatedAt in the request ({testDTO.CreatedAt})");
                 }
                 if (await reader.ReadAsync()) throw new Exception();
                 reader.Close();
@@ -146,7 +154,7 @@ public class DbService : IDbService
         }
         catch (Exception e)
         {
-            Console.WriteLine("Rollback "+e.Message);
+            //Console.WriteLine("Rollback: "+e.Message);
             await transaction.RollbackAsync();
             throw;
         }
@@ -154,6 +162,38 @@ public class DbService : IDbService
         return ret;
     }
 
+    public async Task<int> TestStored(TestDTO testDTO)
+    {
+        await using var connection = new SqlConnection(_configuration.GetConnectionString("Default"));
+        await using SqlCommand command = connection.CreateCommand();
+        
+        command.Connection = connection;
+        await connection.OpenAsync();
+        
+        DbTransaction transaction = connection.BeginTransaction();
+        command.Transaction = transaction as SqlTransaction;
+
+        try
+        {
+            // Run stored procedure
+            command.CommandText = "EXEC AddProductToWarehouse @IdProduct, @IdWarehouse, @Amount, @CreatedAt;";
+            command.Parameters.AddWithValue("@IdProduct", testDTO.IdProduct);
+            command.Parameters.AddWithValue("@IdWarehouse", testDTO.IdWarehouse);
+            command.Parameters.AddWithValue("@Amount", testDTO.Amount);
+            command.Parameters.AddWithValue("@CreatedAt", DateTime.Now);
+            var result = await command.ExecuteScalarAsync();
+            int productWarehouseId = Convert.ToInt32(result);
+
+            return productWarehouseId;
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine("Rollback: "+e.Message);
+            await transaction.RollbackAsync();
+            throw;
+        }
+    }
+    
     public async Task DoSomethingAsync()
     {
         await using SqlConnection connection = new SqlConnection(_configuration.GetConnectionString("Default"));

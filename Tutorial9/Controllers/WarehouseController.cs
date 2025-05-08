@@ -27,13 +27,40 @@ public class WarehouseController : ControllerBase
     [HttpGet("test")]
     public async Task<IActionResult> Test([FromBody] TestDTO testDTO)
     {
-        Task<int> task = _dbService.Test(testDTO);
+        Task<int> task;
+        try
+        {
+            task = _dbService.Test(testDTO);
+        }
+        catch (DbService.NotFoundException ex)
+        {
+            return NotFound(ex.Message);
+        }
+        catch (ArgumentException e1)
+        {
+            return BadRequest(e1.Message);
+        }
+
         return Ok(task.Result);
     }
 
-    /*[HttpGet("storedTest")]
-    public async Task<IActionResult> StoredTest()
+    [HttpGet("testStored")]
+    public async Task<IActionResult> TestStored([FromBody] TestDTO testDTO)
     {
+        Task<int> task;
+        try
+        {
+            task = _dbService.TestStored(testDTO);
+        }
+        catch (DbService.NotFoundException ex)
+        {
+            return NotFound(ex.Message);
+        }
+        catch (ArgumentException e1)
+        {
+            return BadRequest(e1.Message);
+        }
         
-    }*/
+        return Ok(task.Result);
+    }
 }
