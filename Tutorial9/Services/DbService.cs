@@ -14,14 +14,13 @@ public class DbService : IDbService
         _configuration = configuration;
     }
 
-    private async Task<bool> CheckIfExists(SqlCommand command, string tableName, string idColumnName, int id)
+    private async Task<bool> CheckIfWarehouseExists(SqlCommand command, int id)
     {
         bool exists = false;
-        command.CommandText = "SELECT COUNT(*) AS CountWithId FROM @tableName WHERE @idColumnName = @id";
+        command.CommandText = "SELECT COUNT(*) AS CountWithId FROM Warehouse WHERE IdWarehouse = @id";
         command.Parameters.AddWithValue("@id", id);
-        command.Parameters.AddWithValue("@tableName", tableName);
-        command.Parameters.AddWithValue("@idColumnName", idColumnName);
         var reader = await command.ExecuteReaderAsync();
+        await reader.ReadAsync();
         var count = reader.GetInt32(reader.GetOrdinal("CountWithId"));
         reader.Close();
         command.Parameters.Clear();
@@ -30,8 +29,12 @@ public class DbService : IDbService
         return exists;
     }
 
-    public async Task Test(TestDTO testDTO)
+    public async Task<int> Test(TestDTO testDTO)
     {
+        int ret = -1;
+        
+        Console.WriteLine("Connection string: "+_configuration.GetConnectionString("Default"));
+        
         await using var connection = new SqlConnection(_configuration.GetConnectionString("Default"));
         await using SqlCommand command = connection.CreateCommand();
 
@@ -44,22 +47,25 @@ public class DbService : IDbService
         try
         {
             // Step 1
-            if (!CheckIfExists(command, "Product", "IdProduct", testDTO.IdProduct).Result)
-            {
-                throw new Exception("Product ID not found");
-            }
-            
             command.Parameters.Clear();
             command.CommandText = "SELECT IdProduct, Price FROM Product WHERE IdProduct = @IdProduct";
             command.Parameters.AddWithValue("@IdProduct", testDTO.IdProduct);
-            await command.ExecuteReaderAsync();
+            // Execute *only once*, either command.ExecuteNonQueryAsync() OR command.ExecuteReaderAsync()
+            //await command.ExecuteNonQueryAsync();
 
+            decimal price;
+            
             using (var reader = await command.ExecuteReaderAsync())
             {
                 await reader.ReadAsync();
+                price = reader.GetDecimal(reader.GetOrdinal("Price"));
+                if (await reader.ReadAsync()) throw new Exception();
+                reader.Close();
             }
+            
+            decimal priceAmount = price * testDTO.Amount;
 
-            if (!CheckIfExists(command, "Warehouse", "IdWarehouse", testDTO.IdWarehouse).Result)
+            if (!CheckIfWarehouseExists(command, testDTO.IdWarehouse).Result)
             {
                 throw new Exception("Warehouse ID not found");
             }
@@ -71,61 +77,81 @@ public class DbService : IDbService
 
             // Step 2
             command.Parameters.Clear();
-            command.CommandText = "SELECT IdOrder, CreatedAt FROM Order WHERE IdProduct = @IdProduct AND Amount = @Amount";
+            // !!! Order needs to be quoted
+            command.CommandText = "SELECT IdOrder, CreatedAt FROM \"Order\" WHERE IdProduct = @IdProduct AND Amount = @Amount";
             command.Parameters.AddWithValue("@IdProduct", testDTO.IdProduct);
             command.Parameters.AddWithValue("@Amount", testDTO.Amount);
-            await command.ExecuteNonQueryAsync();
+            //await command.ExecuteNonQueryAsync();
             
             int? idOrder = null;
             await using (var reader = await command.ExecuteReaderAsync())
             {
-                await reader.ReadAsync();
+                if (!await reader.ReadAsync())
+                {
+                    throw new Exception("Corresponding order not found");
+                }
                 idOrder = reader.GetInt32(reader.GetOrdinal("IdOrder"));
                 var createdAt = reader.GetDateTime(reader.GetOrdinal("CreatedAt"));
                 if (!(createdAt < testDTO.CreatedAt))
                 {
-                    throw new Exception("CreatedAt of the Order is not lower than CreatedAt in the request");
+                    throw new Exception($"CreatedAt of the Order ({createdAt}) is not lower than CreatedAt in the request ({testDTO.CreatedAt})");
                 }
                 if (await reader.ReadAsync()) throw new Exception();
+                reader.Close();
             }
             
             // Step 3
             command.Parameters.Clear();
             command.CommandText = "SELECT COUNT(*) as CountWithId FROM Product_Warehouse WHERE IdOrder = @IdOrder";
             command.Parameters.AddWithValue("@IdOrder", idOrder.Value);
-            await command.ExecuteNonQueryAsync();
+            //await command.ExecuteNonQueryAsync();
             
             await using (var reader = await command.ExecuteReaderAsync())
             {
                 await reader.ReadAsync();
                 var count = reader.GetInt32(reader.GetOrdinal("CountWithId"));
                 if(count > 0) throw new Exception("This order has already been completed");
+                reader.Close();
             }
             
             // Step 4
             command.Parameters.Clear();
-            command.CommandText = "UPDATE Order SET FulfilledAt = @FulfilledAt WHERE IdOrder = @IdOrder";
+            // Order quoted
+            command.CommandText = "UPDATE \"Order\" SET FulfilledAt = @FulfilledAt WHERE IdOrder = @IdOrder";
             command.Parameters.AddWithValue("@FulfilledAt", DateTime.Now);
             command.Parameters.AddWithValue("@IdOrder", idOrder.Value);
             await command.ExecuteNonQueryAsync();
             
-            // Step 5
+            // Step 5+6
             command.Parameters.Clear();
-            command.CommandText = "INSERT INTO Product_Warehouse (IdWarehouse, IdProduct, IdOrder, Amount, Price, CreatedAt) VALUES (@IdWarehouse, @IdProduct, @IdOrder, @Amount, @Price, @CreatedAt)";
+            command.CommandText = "INSERT INTO Product_Warehouse (IdWarehouse, IdProduct, IdOrder, Amount, Price, CreatedAt) OUTPUT INSERTED.IdProductWarehouse VALUES (@IdWarehouse, @IdProduct, @IdOrder, @Amount, @Price, @CreatedAt)";
             command.Parameters.AddWithValue("@IdWarehouse", testDTO.IdWarehouse);
             command.Parameters.AddWithValue("@IdProduct", testDTO.IdProduct);
             command.Parameters.AddWithValue("@IdOrder", idOrder.Value);
             command.Parameters.AddWithValue("@Amount", testDTO.Amount);
-            //command.Parameters.AddWithValue("@Price", );
-            await command.ExecuteNonQueryAsync();
+            command.Parameters.AddWithValue("@Price", priceAmount);
+            command.Parameters.AddWithValue("@CreatedAt", DateTime.Now);
+            //await command.ExecuteNonQueryAsync();
+            
+            await using (var reader = await command.ExecuteReaderAsync())
+            {
+                await reader.ReadAsync();
+                ret = reader.GetInt32(reader.GetOrdinal("IdProductWarehouse"));
+                reader.Close();
+            }
+            
+            command.Parameters.Clear();
             
             await transaction.CommitAsync();
         }
         catch (Exception e)
         {
+            Console.WriteLine("Rollback "+e.Message);
             await transaction.RollbackAsync();
             throw;
         }
+
+        return ret;
     }
 
     public async Task DoSomethingAsync()
