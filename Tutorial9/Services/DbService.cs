@@ -184,6 +184,8 @@ public class DbService : IDbService
             var result = await command.ExecuteScalarAsync();
             int productWarehouseId = Convert.ToInt32(result);
 
+            await transaction.CommitAsync();
+            
             return productWarehouseId;
         }
         catch (Exception e)
